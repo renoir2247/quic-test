@@ -42,6 +42,8 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/regexp v0.0.0-20240518133315-a468a5bfb3bc // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
+	github.com/klauspost/reedsolomon v1.12.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
