@@ -19,6 +19,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // LossModel — модель канала.
@@ -41,6 +42,7 @@ type LossConfig struct {
 	GroupOff  int       `json:"group_off"` // смещение позиции потери в группе
 	Seed      int64     `json:"seed"`
 	MinSymbol int       `json:"min_symbol_bytes"` // порог «символьного» пакета
+	Delay     time.Duration `json:"delay"`        // односторонняя задержка (обе стороны)
 }
 
 // LossStats — статистика инжектора.
@@ -51,7 +53,8 @@ type LossStats struct {
 	SymbolDropped   atomic.Int64
 }
 
-// LossPacketConn — обёртка net.PacketConn с инжекцией потерь исходящих пакетов.
+// LossPacketConn — обёртка net.PacketConn с инжекцией потерь исходящих пакетов
+// и опциональной симметричной односторонней задержкой (эмуляция RTT).
 type LossPacketConn struct {
 	net.PacketConn
 	cfg   LossConfig
@@ -65,6 +68,19 @@ type LossPacketConn struct {
 	runCnt  int64
 	symPos  int // позиция внутри группы (по символьным пакетам)
 	groupIdx int64
+
+	// задержка: последовательные очереди в обе стороны (сохраняют порядок)
+	delay   time.Duration
+	wCh     chan delayedPkt
+	wDone   chan struct{}
+	rCh     chan delayedPkt
+	rDone   chan struct{}
+}
+
+type delayedPkt struct {
+	b    []byte
+	addr net.Addr
+	at   time.Time // момент доставки
 }
 
 // NewLossPacketConn оборачивает conn согласно cfg.
@@ -75,12 +91,56 @@ func NewLossPacketConn(conn net.PacketConn, cfg LossConfig) *LossPacketConn {
 	if cfg.Model == LossGilbert && cfg.BurstLen <= 1.0 {
 		cfg.Model = LossBernoulli
 	}
-	return &LossPacketConn{
+	l := &LossPacketConn{
 		PacketConn: conn,
 		cfg:        cfg,
 		rng:        rand.New(rand.NewSource(cfg.Seed)),
 	}
+	if cfg.Delay > 0 {
+		l.delay = cfg.Delay
+		l.wCh = make(chan delayedPkt, 4096)
+		l.wDone = make(chan struct{})
+		l.rCh = make(chan delayedPkt, 4096)
+		l.rDone = make(chan struct{})
+		go l.pumpWriter()
+		go l.pumpReader()
+	}
+	return l
 }
+
+// pumpWriter — последовательная отложенная отправка (порядок сохранён).
+func (l *LossPacketConn) pumpWriter() {
+	defer close(l.wDone)
+	for p := range l.wCh {
+		if d := time.Until(p.at); d > 0 {
+			time.Sleep(d)
+		}
+		if _, err := l.PacketConn.WriteTo(p.b, p.addr); err != nil {
+			return
+		}
+	}
+}
+
+// pumpReader — фоновое чтение + отложенная доставка вверх.
+func (l *LossPacketConn) pumpReader() {
+	defer close(l.rDone)
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, addr, err := l.PacketConn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			pkt := delayedPkt{b: append([]byte(nil), buf[:n]...), addr: addr,
+				at: time.Now().Add(l.delay)}
+			select {
+			case l.rCh <- pkt:
+			default: // переполнение очереди задержки = экстремальная «потеря»
+			}
+		}
+	}()
+}
+
 
 // Config возвращает копию конфигурации.
 func (l *LossPacketConn) Config() LossConfig { return l.cfg }
@@ -174,7 +234,38 @@ func (l *LossPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		}
 		return 0, nil // молча «теряем» пакет
 	}
+	if l.delay > 0 {
+		l.wCh <- delayedPkt{b: append([]byte(nil), b...), addr: addr,
+			at: time.Now().Add(l.delay)}
+		return len(b), nil
+	}
 	return l.PacketConn.WriteTo(b, addr)
+}
+
+// ReadFrom — доставка входящих пакетов (с задержкой, если включена).
+func (l *LossPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if l.delay > 0 {
+		pkt, ok := <-l.rCh
+		if !ok {
+			return 0, nil, net.ErrClosed
+		}
+		if d := time.Until(pkt.at); d > 0 {
+			time.Sleep(d)
+		}
+		n := copy(p, pkt.b)
+		return n, pkt.addr, nil
+	}
+	return l.PacketConn.ReadFrom(p)
+}
+
+// Close — закрыть сокет и очереди задержки.
+func (l *LossPacketConn) Close() error {
+	err := l.PacketConn.Close()
+	if l.delay > 0 {
+		close(l.wCh)
+		<-l.wDone
+	}
+	return err
 }
 
 // String — человекочитаемое описание.
