@@ -10,6 +10,7 @@ test-matrix
 test-matrix-runner
 dashboard
 experimental
+/fecexp
 
 # Test binary, built with `go test -c`
 *.test
@@ -42,6 +43,11 @@ Thumbs.db
 # Build artifacts
 build/
 dist/
+*.rlib
+*.rmeta
+
+# Rust build output
+target/
 
 # Test results and data
 test-results/
