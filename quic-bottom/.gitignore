@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Cargo local overrides
+.cargo/
+
+# Rust/C garbage
+*.pdb
+*.profraw

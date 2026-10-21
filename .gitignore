@@ -8,8 +8,8 @@ quic-test
 quic-test-experimental
 test-matrix
 test-matrix-runner
-dashboard
-experimental
+/dashboard
+/experimental
 
 # Test binary, built with `go test -c`
 *.test
@@ -80,3 +80,78 @@ references/
 
 # Coverage reports
 coverage/tui
+coverage/
+coverage.out
+coverage.txt
+*.coverprofile
+
+# Compiled Go binaries (repo root and known outputs)
+/quic-gui
+/quic-test-build
+/quic-test-dashboard
+/cert-gen
+/fecexp
+/tui
+/*.test
+/cmd/tui/tui
+
+# Prebuilt/copied binaries (repo root only)
+/bin/
+
+# Rust build artifacts (quic-bottom)
+target/
+*.rlib
+*.rmeta
+.rustc_info.json
+CACHEDIR.TAG
+
+# C/C++ build artifacts (internal/fec SIMD, cgo)
+*.o
+*.a
+*.dylib
+internal/fec/*.so
+internal/fec/*.dylib
+internal/fec/lib*.a
+internal/fec/fec_test
+internal/fec/fec_benchmark
+
+# TLS certificates and private keys (never commit secrets)
+certs/*.key
+*.pem
+*.key
+*.p12
+*.pfx
+!**/testdata/**/*.key
+!**/testdata/**/*.pem
+
+# Generated / runtime output
+*.json.tmp
+*.csv.tmp
+results/
+performance-results/
+real-world-results/
+*.qlog
+*.sqlog
+*.qlog.gz
+
+# Python (scripts/tooling)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Go workspace / vendor (avoid accidental commits)
+go.work
+go.work.sum
+
+# Container / local overrides
+docker-compose.override.yml
+
+# Editor / OS extras
+*.orig
+*.rej
+*.swp
+.cache/
+.DS_Store
+Thumbs.db
