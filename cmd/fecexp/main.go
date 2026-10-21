@@ -78,29 +78,26 @@ func runServer(listen string, symbolLen int) error {
 	}
 }
 
-func handleServerConn(conn quic.Connection, symbolLen int, totals *serverTotals) {
+func handleServerConn(conn quic.Connection, symbolLen int, _ *serverTotals) {
 	defer conn.CloseWithError(0, "bye")
 	assembler := fecexp.NewGroupAssembler(10 * time.Second)
 	ctx := context.Background()
 
+	// метрики ПО СОЕДИНЕНИЮ (харнесс читает построчно; кумулятив не нужен)
+	perConn := &serverTotals{OWDsMs: []float64{}}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); receiveDatagrams(ctx, conn, assembler, symbolLen, totals) }()
-	go func() { defer wg.Done(); receiveStreams(ctx, conn, assembler, symbolLen, totals) }()
+	go func() { defer wg.Done(); receiveDatagrams(ctx, conn, assembler, symbolLen, perConn) }()
+	go func() { defer wg.Done(); receiveStreams(ctx, conn, assembler, symbolLen, perConn) }()
 	wg.Wait()
 
 	// финализация групп при закрытии соединения
 	assembler.Cleanup(time.Now().Add(11 * time.Second))
 	rec, unrec, groups := assembler.Stats()
-	totals.mu.Lock()
-	totals.FECRecovered += rec
-	totals.FECUnrec += unrec
-	totals.Groups += groups
-	totals.Conns++
-	snap := serverTotals{DataBytes: totals.DataBytes, FECRecovered: totals.FECRecovered,
-		FECUnrec: totals.FECUnrec, Groups: totals.Groups, Conns: totals.Conns}
-	owd := append([]float64(nil), totals.OWDsMs...)
-	totals.mu.Unlock()
+	snap := serverTotals{DataBytes: perConn.DataBytes, FECRecovered: rec,
+		FECUnrec: unrec, Groups: groups, Conns: 1}
+	owd := append([]float64(nil), perConn.OWDsMs...)
 
 	out := map[string]any{
 		"event": "server_conn_done", "data_bytes": snap.DataBytes,
