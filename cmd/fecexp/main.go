@@ -78,7 +78,7 @@ func runServer(listen string, symbolLen int) error {
 	}
 }
 
-func handleServerConn(conn quic.Connection, symbolLen int, _ *serverTotals) {
+func handleServerConn(conn quic.Connection, symbolLen int, totals *serverTotals) {
 	defer conn.CloseWithError(0, "bye")
 	assembler := fecexp.NewGroupAssembler(10 * time.Second)
 	ctx := context.Background()
@@ -98,6 +98,15 @@ func handleServerConn(conn quic.Connection, symbolLen int, _ *serverTotals) {
 	snap := serverTotals{DataBytes: perConn.DataBytes, FECRecovered: rec,
 		FECUnrec: unrec, Groups: groups, Conns: 1}
 	owd := append([]float64(nil), perConn.OWDsMs...)
+	// аккумулируем в переданные totals (используются selftest-чекерами)
+	totals.mu.Lock()
+	totals.DataBytes += snap.DataBytes
+	totals.FECRecovered += snap.FECRecovered
+	totals.FECUnrec += snap.FECUnrec
+	totals.Groups += snap.Groups
+	totals.Conns++
+	totals.OWDsMs = append(totals.OWDsMs, owd...)
+	totals.mu.Unlock()
 
 	out := map[string]any{
 		"event": "server_conn_done", "data_bytes": snap.DataBytes,
