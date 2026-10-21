@@ -555,6 +555,7 @@ func main() {
 		fs.IntVar(&o.loss.GroupM, "ga-m", 1, "потерь на группу (groupaligned)")
 		fs.IntVar(&o.loss.GroupOff, "ga-off", 2, "позиция потери в группе (groupaligned)")
 		fs.Int64Var(&o.loss.Seed, "seed", 1, "seed инжектора")
+		fs.DurationVar(&o.loss.Delay, "delay", 0, "односторонняя задержка (эмуляция RTT=2*delay)")
 		fs.Parse(os.Args[2:])
 		o.loss.Model = fecexp.LossModel(*lossModel)
 		if err := runClient(o); err != nil {
