@@ -164,12 +164,23 @@ type AdaptiveController struct {
 }
 
 // NewAdaptiveController — стартует консервативно (FEC off).
-func NewAdaptiveController(sig *CCSignals, path string, k0 int) *AdaptiveController {
+// ccModel: "bbr" (RFC 9265, честный учёт) | "cubic" (CC-прозрачный режим).
+func NewAdaptiveController(sig *CCSignals, path, ccModel string, k0 int) *AdaptiveController {
 	return &AdaptiveController{
-		signals: sig, path: path, ccModel: "bbr",
+		signals: sig, path: path, ccModel: ccModel,
 		curK: k0, curR: 0, curCodec: CodecRS,
 		minDwell: 3 * time.Second, lastSw: time.Now(),
 	}
+}
+
+// Warmup — минимальное время удержания схемы. В CC-прозрачном режиме гейт
+// активации 0,005 (порог шума), оценке достаточно ~200 символов, поэтому
+// прогрев короче: 1 с против 3 с в режиме RFC 9265.
+func (a *AdaptiveController) warmup() time.Duration {
+	if a.ccModel == "cubic" {
+		return time.Second
+	}
+	return a.minDwell
 }
 
 // Scheme — текущая схема.
@@ -198,7 +209,7 @@ func (a *AdaptiveController) History() []string {
 func (a *AdaptiveController) Update(now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if now.Sub(a.lastSw) < a.minDwell {
+	if now.Sub(a.lastSw) < a.warmup() {
 		return
 	}
 	pHat, burstHat, _, losses, sent := a.signals.Snapshot()
@@ -223,10 +234,17 @@ func (a *AdaptiveController) Update(now time.Time) {
 
 func lookupPolicy(path, cc string, pHat, burstHat float64) (int, int) {
 	loadPolicy()
-	// гейт случая A: FEC включать только когда это может окупиться
-	// (p_res >= 0 при идеальном восстановлении: p̂ > eps/(1+eps) с запасом)
+	// гейт случая A (bbr, RFC 9265): FEC включать только когда это может
+	// окупиться (p_res >= 0 при идеальном восстановлении: p̂ > eps/(1+eps)
+	// с запасом). В CC-прозрачном режиме (cubic) восстановление убирает и
+	// потерю, и реакцию CC, поэтому окупаемость наступает сразу — гейт
+	// ослаблен до порога шума оценки p̂.
 	const eps = 0.10
-	if pHat < eps/(1+eps)*0.75 {
+	gate := 0.005
+	if cc != "cubic" {
+		gate = eps / (1 + eps) * 0.75
+	}
+	if pHat < gate {
 		return 16, 0
 	}
 	bestD := math.Inf(1)

@@ -69,6 +69,11 @@ type LossPacketConn struct {
 	symPos  int // позиция внутри группы (по символьным пакетам)
 	groupIdx int64
 
+	// fecexp (research fork): ординалы уроненных символьных пакетов
+	// (кольцевой буфер) для sender-side предсказания восстановления
+	dropOrdMu sync.Mutex
+	dropOrd   []int64
+
 	// задержка: последовательные очереди в обе стороны (сохраняют порядок)
 	delay   time.Duration
 	wCh     chan delayedPkt
@@ -151,6 +156,23 @@ func (l *LossPacketConn) Stats() (seen, dropped, symSeen, symDropped int64) {
 		l.stats.SymbolPackets.Load(), l.stats.SymbolDropped.Load()
 }
 
+// SymbolOrdinal — текущий счетчик символьных пакетов (знаменатель диапазонов).
+func (l *LossPacketConn) SymbolOrdinal() int64 { return l.stats.SymbolPackets.Load() }
+
+// DroppedInRange — сколько символьных пакетов с ординалами из (from, to]
+// было уронено.
+func (l *LossPacketConn) DroppedInRange(from, to int64) int {
+	l.dropOrdMu.Lock()
+	defer l.dropOrdMu.Unlock()
+	n := 0
+	for _, o := range l.dropOrd {
+		if o > from && o <= to {
+			n++
+		}
+	}
+	return n
+}
+
 // MeanBurstLen возвращает среднюю длину наблюдаемых серий потерь (для калибровки).
 func (l *LossPacketConn) MeanBurstLen() float64 {
 	l.mu.Lock()
@@ -225,7 +247,15 @@ func (l *LossPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	l.mu.Unlock()
 
 	if isSymbol {
-		l.stats.SymbolPackets.Add(1)
+		ord := l.stats.SymbolPackets.Add(1) // ординал этого пакета (1-based)
+		if drop {
+			l.dropOrdMu.Lock()
+			l.dropOrd = append(l.dropOrd, ord)
+			if len(l.dropOrd) > 8192 {
+				l.dropOrd = l.dropOrd[len(l.dropOrd)-4096:]
+			}
+			l.dropOrdMu.Unlock()
+		}
 	}
 	if drop {
 		l.stats.PacketsDropped.Add(1)

@@ -122,12 +122,17 @@ func handleServerConn(conn quic.Connection, symbolLen int, totals *serverTotals)
 }
 
 func receiveDatagrams(ctx context.Context, conn quic.Connection, a *fecexp.GroupAssembler, symbolLen int, t *serverTotals) {
+	onRecovered := func(groupID uint64, n int) {
+		fb := make([]byte, fecexp.FeedbackLen)
+		fecexp.EncodeFeedback(fb, groupID)
+		_ = conn.SendDatagram(fb)
+	}
 	for {
 		frame, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
 			return
 		}
-		consumeFrame(frame, a, symbolLen, t)
+		consumeFrame(frame, a, symbolLen, t, onRecovered)
 	}
 }
 
@@ -149,11 +154,11 @@ func readStream(stream quic.Stream, a *fecexp.GroupAssembler, symbolLen int, t *
 		if _, err := io.ReadFull(rd, frame); err != nil {
 			return
 		}
-		consumeFrame(frame, a, symbolLen, t)
+		consumeFrame(frame, a, symbolLen, t, nil)
 	}
 }
 
-func consumeFrame(frame []byte, a *fecexp.GroupAssembler, symbolLen int, t *serverTotals) {
+func consumeFrame(frame []byte, a *fecexp.GroupAssembler, symbolLen int, t *serverTotals, onRecovered func(groupID uint64, n int)) {
 	h, ok := fecexp.ParseSymbolHeader(frame)
 	if !ok {
 		return
@@ -176,7 +181,11 @@ func consumeFrame(frame []byte, a *fecexp.GroupAssembler, symbolLen int, t *serv
 		}
 	}
 	t.mu.Unlock()
-	a.Add(frame, now)
+	recovered := a.Add(frame, now)
+	// feedback отправителю: группа восстановлена (CC-прозрачный режим)
+	if len(recovered) > 0 && onRecovered != nil {
+		onRecovered(h.GroupID, len(recovered))
+	}
 }
 
 // -----------------------------------------------------------------------
@@ -191,6 +200,7 @@ type clientOpts struct {
 	duration                                            time.Duration
 	loss                                                fecexp.LossConfig
 	eps                                                 float64
+	transparent                                         bool // CC-прозрачный режим (fecexp-форк)
 }
 
 func runClient(o clientOpts) error {
@@ -202,6 +212,8 @@ func runClient(o clientOpts) error {
 	tr := &quic.Transport{Conn: inj}
 
 	sig := fecexp.NewCCSignals()
+	sup := fecexp.NewSuppressSet()
+	tracker := fecexp.NewRecoveryTracker(sup)
 	quicCfg := &quic.Config{
 		EnableDatagrams: true,
 		Tracer: func(ctx context.Context, p logging.Perspective, cid quic.ConnectionID) *logging.ConnectionTracer {
@@ -220,10 +232,28 @@ func runClient(o clientOpts) error {
 			}
 		},
 	}
+	if o.transparent {
+		quicCfg.LossFilter = sup.Contains
+		quicCfg.DatagramSent = tracker.OnDatagramSent
+	}
 	tlsConf := &tls.Config{InsecureSkipVerify: true, NextProtos: []string{alpn}}
 	conn, err := tr.Dial(context.Background(), mustResolve(o.addr), tlsConf, quicCfg)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
+	}
+	if o.transparent {
+		go func() {
+			ctx := context.Background()
+			for {
+				frame, err := conn.ReceiveDatagram(ctx)
+				if err != nil {
+					return
+				}
+				if gid, ok := fecexp.ParseFeedback(frame); ok {
+					tracker.OnRecovered(gid)
+				}
+			}
+		}()
 	}
 
 	// режимы FEC
@@ -241,7 +271,11 @@ func runClient(o clientOpts) error {
 	}
 	var ctrl *fecexp.AdaptiveController
 	if o.fecScheme == "adaptive" {
-		ctrl = fecexp.NewAdaptiveController(sig, o.mode, k0)
+		ccModel := "bbr"
+		if o.transparent {
+			ccModel = "cubic"
+		}
+		ctrl = fecexp.NewAdaptiveController(sig, o.mode, ccModel, k0)
 	}
 
 	var stream quic.Stream
@@ -261,6 +295,7 @@ func runClient(o clientOpts) error {
 	}
 
 	sentData, sentRepair := 0, 0
+	var groupStartOrd int64 // ординал инжектора на начале группы
 	frame := make([]byte, fecexp.SymHdrLen+o.symbolLen)
 	t0 := time.Now()
 	deadline := t0.Add(o.duration)
@@ -289,6 +324,7 @@ func runClient(o clientOpts) error {
 		}
 		if symIdx == 0 {
 			inj.ResetGroupCounter() // group-aligned: фаза инжектора = граница группы
+			groupStartOrd = inj.SymbolOrdinal()
 		}
 		sendT := time.Now().UnixNano()
 		fecexp.EncodeSymbolHeader(frame, fecexp.SymTypeData, gid, symIdx, encK(enc), encR(enc), sendT)
@@ -301,6 +337,14 @@ func runClient(o clientOpts) error {
 		}
 		sentData++
 		sig.OnSent()
+		// CC-прозрачный режим: пока урон группы < r, все отправленные символы
+		// группы восстановимы — подавлять их PN-ы немедленно (реакция CC для
+		// символа сработает только через ~RTT)
+		if o.transparent {
+			if d := inj.DroppedInRange(groupStartOrd, inj.SymbolOrdinal()); int(d) < encR(enc) {
+				tracker.SuppressPending(gid)
+			}
+		}
 
 		if done {
 			for ri, rep := range repairs {
@@ -311,6 +355,12 @@ func runClient(o clientOpts) error {
 					break
 				}
 				sentRepair++
+			}
+			// sender-side предсказание восстановления: уронено <= r символов
+			// группы -> MDS гарантирует восстановление -> подавить реакцию CC
+			// (регистрация в момент отправки; реакция CC — через ~RTT)
+			if o.transparent && int(inj.DroppedInRange(groupStartOrd, inj.SymbolOrdinal())) <= encR(enc) {
+				tracker.SuppressGroup(gid)
 			}
 		}
 	}
@@ -327,7 +377,7 @@ func runClient(o clientOpts) error {
 	seen, droppedPkts, symSeen, symDropped := inj.Stats()
 	_, _, srtt, _, _ := sig.Snapshot()
 	out := map[string]any{
-		"event": "client_done", "mode": o.mode, "fec": o.fecScheme,
+		"event": "client_done", "mode": o.mode, "fec": o.fecScheme, "transparent": o.transparent, "cc_suppressed": sup.Hits(), "cc_armed": sup.Armed(), "cc_calls": sup.Calls(), "cc_tracked": tracker.Tracked(),
 		"sent_data": sentData, "sent_repair": sentRepair, "tail_dropped": dropped,
 		"symbol_len": o.symbolLen, "duration_s": o.duration.Seconds(),
 		"inj_seen": seen, "inj_dropped": droppedPkts,
@@ -562,6 +612,7 @@ func main() {
 		fs.IntVar(&o.loss.GroupOff, "ga-off", 2, "позиция потери в группе (groupaligned)")
 		fs.Int64Var(&o.loss.Seed, "seed", 1, "seed инжектора")
 		fs.DurationVar(&o.loss.Delay, "delay", 0, "односторонняя задержка (эмуляция RTT=2*delay)")
+		fs.BoolVar(&o.transparent, "cc-transparent", false, "CC-прозрачный режим: восстановленные FEC потери не учитываются контроллером перегрузки")
 		fs.Parse(os.Args[2:])
 		o.loss.Model = fecexp.LossModel(*lossModel)
 		if err := runClient(o); err != nil {

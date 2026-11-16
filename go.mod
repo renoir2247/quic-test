@@ -8,6 +8,7 @@ require (
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2
 	github.com/fatih/color v1.18.0
 	github.com/guptarohit/asciigraph v0.7.3
+	github.com/klauspost/reedsolomon v1.12.1
 	github.com/olekukonko/tablewriter v1.1.1
 	github.com/pion/ice/v2 v2.3.38
 	github.com/pion/stun v0.6.1
@@ -43,7 +44,6 @@ require (
 	github.com/grafana/regexp v0.0.0-20240518133315-a468a5bfb3bc // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
-	github.com/klauspost/reedsolomon v1.12.1 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -87,3 +87,5 @@ require (
 	google.golang.org/protobuf v1.36.8 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/quic-go/quic-go => ../quic-go-fec
